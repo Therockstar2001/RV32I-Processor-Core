@@ -1,0 +1,63 @@
+# RV32I 5-Stage Pipelined Processor with UVM Verification
+
+## Overview
+This project implements a **5-stage pipelined RV32I processor** and a
+**UVM-based verification environment** to validate functional correctness,
+pipeline hazards, and control-flow behavior.
+
+The focus of this project is **design verification**, including
+scoreboarding, coverage-driven stimulus, and commit-based checking.
+
+---
+
+## Processor Features
+- RV32I base ISA
+- 5-stage pipeline:
+  - IF, ID, EX, MEM, WB
+- Data hazard handling:
+  - Load-use stall (1 bubble)
+  - EX/MEM and MEM/WB forwarding
+- Control hazard handling:
+  - BEQ / BNE
+  - JAL / JALR
+  - Pipeline flush on redirect (no branch prediction)
+- Single-cycle instruction and data memory models
+
+---
+
+## Verification Environment (UVM)
+- Commit-based monitoring (WB stage)
+- Golden reference model scoreboard
+- Functional coverage:
+  - Opcode coverage
+  - Branch taken / not taken
+  - Jumps (JAL / JALR)
+  - Load-use hazard detection
+  - Pipeline flush events
+- Coverage-driven program generation
+
+Achieved **~77% functional coverage** with zero scoreboard errors.
+
+---
+
+## Tools Used
+- SystemVerilog
+- UVM (IEEE 1800.2-2017)
+- Riviera-PRO / EDA Playground
+- TCL (`run.do`) simulation scripting
+
+---
+
+## How to Run (EDA Playground)
+1. Upload `design.sv` and `testbench.sv`
+2. Enable **UVM**
+3. Add compile define: +define+TB_LOADS_PROGRAM
+4. Use `run.do` as the simulation script
+5. Run simulation and view coverage results
+
+---
+
+## Notes
+This project emphasizes **verification methodology** rather than performance
+optimization. It is intended as a learning and demonstration platform for
+ASIC/SoC verification workflows.
