@@ -1,63 +1,434 @@
-# RV32I 5-Stage Pipelined Processor with UVM Verification
+# Latency-Tolerant RV32I Processor Core with Cache Hierarchy and UVM Commit-Trace Verification
 
-## Overview
-This project implements a **5-stage pipelined RV32I processor** and a
-**UVM-based verification environment** to validate functional correctness,
-pipeline hazards, and control-flow behavior.
+**README / Project Technical Documentation**
 
-The focus of this project is **design verification**, including
-scoreboarding, coverage-driven stimulus, and commit-based checking.
+**Phase 3 Complete:** Modular Pipeline, Variable-Latency Memory Path, I-Cache, D-Cache, Stress Testing, Coverage, and Assertions
 
----
+| Metric | Latest Result |
+|---|---|
+| RTL simulation clock | 1 ns period / 1 GHz-equivalent testbench clock |
+| Commit functional coverage | 76.74% |
+| I-cache functional coverage | 100.00% |
+| D-cache functional coverage | 100.00% |
+| Scoreboard errors | 0 |
+| Cache assertion failures | 0 |
+| Final regression status | PHASE PASS |
 
-## Processor Features
-- RV32I base ISA
-- 5-stage pipeline:
-  - IF, ID, EX, MEM, WB
-- Data hazard handling:
-  - Load-use stall (1 bubble)
-  - EX/MEM and MEM/WB forwarding
-- Control hazard handling:
-  - BEQ / BNE
-  - JAL / JALR
-  - Pipeline flush on redirect (no branch prediction)
-- Single-cycle instruction and data memory models
+> **Note:** The 1 GHz value is the RTL testbench simulation clock. It is not a post-synthesis Fmax or timing-closure claim.
 
 ---
 
-## Verification Environment (UVM)
-- Commit-based monitoring (WB stage)
-- Golden reference model scoreboard
-- Functional coverage:
-  - Opcode coverage
-  - Branch taken / not taken
-  - Jumps (JAL / JALR)
-  - Load-use hazard detection
-  - Pipeline flush events
-- Coverage-driven program generation
+## 1. Overview
 
-Achieved **~77% functional coverage** with zero scoreboard errors.
+This project implements and verifies a 5-stage pipelined RV32I processor core using a structured SystemVerilog/UVM verification environment. The design has evolved from a basic pipeline into a latency-tolerant CPU subsystem with external instruction/data memory interfaces, a variable-latency memory transaction unit, and a verified instruction/data cache hierarchy.
+
+The primary focus is CPU design verification. The testbench validates architectural correctness using commit-trace monitoring, an independent scoreboard/reference model, coverage-driven program generation, directed cache stress sequences, cache statistics, and protocol-level SystemVerilog assertions.
+
+| Development Phase | Scope | Status |
+|---|---|---|
+| Phase 1 | Modular RTL refactor into reusable CPU blocks | Complete |
+| Phase 2 | External instruction/data memory interfaces and variable-latency memory transaction unit | Complete |
+| Phase 3 | Direct-mapped I-cache, write-through D-cache, cache stress testing, coverage, and assertions | Complete |
 
 ---
 
-## Tools Used
+## 2. High-Level Architecture
+
+```text
+                  +---------------------------+
+                  |        UVM Testbench       |
+                  |---------------------------|
+                  | Directed Program Generator |
+                  | Commit Monitor             |
+                  | Scoreboard / Ref Model     |
+                  | Functional Coverage        |
+                  | Cache Protocol Assertions  |
+                  +-------------+-------------+
+                                |
+                                v
+                  +---------------------------+
+                  |       RV32I CPU Core       |
+                  |---------------------------|
+                  | IF -> ID -> EX -> MEM -> WB|
+                  | Hazard Unit / Forwarding   |
+                  | Branch/JAL Redirect Logic  |
+                  | Memory Transaction Unit    |
+                  +------+----------------+----+
+                         |                |
+                  I-side |                | D-side
+                         v                v
+              +----------------+     +------------------+
+              |    I-Cache     |     |     D-Cache       |
+              | Direct-Mapped  |     | Direct-Mapped     |
+              | Miss/Refill FSM|     | Write-Through     |
+              +-------+--------+     +---------+--------+
+                      |                        |
+                      v                        v
+          Variable-Latency Instruction   Variable-Latency Data
+                 Memory Model                Memory Model
+```
+
+---
+
+## 3. Processor Features
+
+### 3.1 ISA Support
+
+The core supports a verification-oriented RV32I subset that exercises integer execution, memory access, and control-flow behavior.
+
+| Instruction Class | Supported Instructions |
+|---|---|
+| Integer immediate | ADDI, ANDI, ORI, XORI |
+| Register-register ALU | ADD, SUB, AND, OR, XOR |
+| Upper immediate | LUI, AUIPC |
+| Memory | LW, SW |
+| Control flow | BEQ, BNE, JAL, JALR |
+
+### 3.2 Pipeline Microarchitecture
+
+- Classic 5-stage in-order pipeline: IF, ID, EX, MEM, WB.
+- Single-issue, in-order commit model.
+- Architectural x0 register hardwired to zero.
+- Pipeline valid-bit tracking to support bubbles, redirects, and stalls.
+- EX-stage branch and jump redirect handling.
+- Commit-stage observability for UVM scoreboarding and coverage.
+
+### 3.3 Hazard Handling
+
+| Hazard Type | Implemented Handling |
+|---|---|
+| RAW ALU dependency | EX/MEM and MEM/WB forwarding |
+| Load-use dependency | One-cycle stall/bubble insertion |
+| Taken branch | EX-stage redirect and younger instruction flush |
+| JAL/JALR | Redirect to computed target and pipeline flush |
+| Variable-latency memory | Pipeline held through memory transaction unit until response returns |
+
+---
+
+## 4. Modular RTL Organization
+
+| File / Module | Purpose |
+|---|---|
+| `rv32i_pkg.sv` | Shared enums, structs, constants, and immediate helper functions |
+| `rv32i_alu.sv` | Integer ALU operations |
+| `rv32i_regfile.sv` | 32-entry integer register file with x0 protection |
+| `rv32i_decode.sv` | Instruction decode and control-signal generation |
+| `rv32i_hazard_unit.sv` | Load-use hazard detection |
+| `rv32i_forward_unit.sv` | EX/MEM and MEM/WB forwarding select generation |
+| `rv32i_mem_unit.sv` | Variable-latency load/store transaction handling |
+| `rv32i_icache.sv` | Direct-mapped instruction cache with miss/refill FSM |
+| `rv32i_dcache.sv` | Direct-mapped write-through data cache |
+| `rv32i_core.sv` | Top-level 5-stage RV32I CPU core |
+| `design.sv` | Top-level include wrapper for EDA Playground compilation |
+| `testbench.sv` | UVM environment, memory models, cache coverage, assertions, and directed stimulus |
+
+---
+
+## 5. External Memory Interface
+
+The CPU no longer accesses instruction/data arrays directly. Instead, it uses explicit request/response interfaces that allow the testbench to model latency, backpressure, cache behavior, and external memory responses.
+
+### 5.1 Instruction Memory Interface
+
+```systemverilog
+output logic        imem_req_valid,
+input  logic        imem_req_ready,
+output logic [31:0] imem_req_addr,
+input  logic        imem_rsp_valid,
+input  logic [31:0] imem_rsp_rdata
+```
+
+### 5.2 Data Memory Interface
+
+```systemverilog
+output logic        dmem_req_valid,
+input  logic        dmem_req_ready,
+output logic        dmem_req_we,
+output logic [31:0] dmem_req_addr,
+output logic [31:0] dmem_req_wdata,
+output logic [3:0]  dmem_req_wstrb,
+input  logic        dmem_rsp_valid,
+input  logic [31:0] dmem_rsp_rdata
+```
+
+---
+
+## 6. Memory Transaction Unit
+
+The `rv32i_mem_unit` bridges the pipeline MEM stage and the external data memory path. It enables the processor to tolerate non-single-cycle load/store latency while preserving architectural commit ordering.
+
+- Launches load/store requests to the external data memory path.
+- Holds pipeline progress while a data memory transaction is outstanding.
+- Captures returned load data and forwards it into MEM/WB.
+- Prevents younger instructions from corrupting an in-flight memory operation.
+- Supports deterministic variable-latency backing memory models in the testbench.
+
+---
+
+## 7. Cache Hierarchy
+
+Phase 3 adds a verified cache hierarchy between the CPU core and the variable-latency backing memory models.
+
+### 7.1 Instruction Cache
+
+- Direct-mapped organization.
+- One 32-bit word per cache line.
+- Valid bit and tag array per line.
+- Hit returns instruction directly to the CPU fetch path.
+- Miss issues a request to the variable-latency instruction memory model.
+- Refill installs the returned instruction into the cache and resumes fetch.
+- Statistics and functional coverage track request, hit, miss, refill, and hit-after-miss behavior.
+
+### 7.2 Data Cache
+
+- Direct-mapped organization with 16 lines.
+- One 32-bit word per cache line.
+- Read-allocate policy for load misses.
+- Write-through store policy.
+- Write hit updates the cached line and writes backing memory.
+- Write miss writes backing memory without allocating a new line.
+- No dirty bit and no write-back eviction path in the current implementation.
+- Statistics and coverage track read, write, hit, miss, refill, write-through, and hit-after-miss behavior.
+
+---
+
+## 8. UVM Verification Environment
+
+| Component | Role |
+|---|---|
+| `commit_txn` | Transaction object carrying PC, instruction, RD, write-enable, and writeback data |
+| `commit_monitor` | Passive monitor sampling committed instructions from the WB/commit boundary |
+| `rv32i_sb` | Independent architectural reference model and scoreboard |
+| `rv32i_cov` | Commit-based functional coverage collector |
+| `ph5_env` | UVM environment connecting monitor, scoreboard, and coverage |
+| `ph5a_test` | Main UVM test controlling simulation duration |
+
+### 8.1 Commit-Trace Scoreboard
+
+The scoreboard checks architectural correctness at commit instead of relying on internal pipeline implementation details. This makes the checker robust across pipeline refactoring and memory-system changes.
+
+- Models architectural register state.
+- Models data memory side effects for LW/SW.
+- Tracks expected PC and next-PC behavior.
+- Checks register write-enable, destination register, and writeback data.
+- Checks branch and jump target behavior.
+- Confirms that all completed instructions preserve architectural ordering.
+
+### 8.2 Functional Coverage
+
+- Opcode coverage across implemented RV32I instruction classes.
+- Branch taken and not-taken coverage.
+- JAL and JALR coverage.
+- Register write-enable coverage.
+- Pipeline flush event coverage.
+- Load-use hazard coverage.
+- Branch/flush and jump/flush cross coverage.
+
+---
+
+## 9. Cache Stress Testing and Assertions
+
+### 9.1 Directed Cache Stress Program
+
+Phase 3F adds a directed program sequence focused on D-cache behavior. It intentionally creates repeated accesses and direct-mapped conflicts to increase hit, miss, refill, and write-through activity.
+
+- Read miss and read hit sequences.
+- Write hit and write miss sequences.
+- Store followed by load to the same address.
+- Repeated reuse of all 16 direct-mapped indices.
+- Conflict accesses using addresses separated by 64 bytes.
+- Write-through store validation through the backing data memory model.
+
+Direct-mapped conflict examples:
+
+```text
+0x00 and 0x40 map to the same D-cache index
+0x04 and 0x44 map to the same D-cache index
+0x08 and 0x48 map to the same D-cache index
+```
+
+### 9.2 Cache Protocol Assertions
+
+Protocol-level SystemVerilog assertions verify that cache/memory handshakes remain legal under variable-latency conditions.
+
+- I-cache response requires an active CPU fetch request.
+- I-cache miss eventually receives a refill.
+- I-cache memory request address remains stable while waiting.
+- Accepted D-cache CPU request eventually receives a response.
+- Accepted D-cache store eventually generates a write-through memory request.
+- D-cache backing memory request remains stable while waiting.
+- D-cache refill and write-through completion do not overlap incorrectly.
+
+---
+
+## 10. Latest Regression Results
+
+| Category | Result |
+|---|---|
+| Compile errors | 0 |
+| Compile warnings | 0 |
+| UVM errors | 0 |
+| UVM fatals | 0 |
+| Scoreboard errors | 0 |
+| Final result | PHASE PASS |
+| Commit functional coverage | 76.74% |
+| I-cache coverage | 100.00% |
+| D-cache coverage | 100.00% |
+| Cache assertion failures | 0 |
+
+### 10.1 I-Cache Statistics
+
+| Metric | Value |
+|---|---:|
+| Requests | 58836 |
+| Hits | 58578 |
+| Misses | 258 |
+| Refills | 258 |
+| Hit rate | 99.56% |
+
+### 10.2 D-Cache Statistics
+
+| Metric | Value |
+|---|---:|
+| Requests | 128 |
+| Reads | 84 |
+| Writes | 44 |
+| Hits | 72 |
+| Misses | 56 |
+| Refills | 32 |
+| Write-through completions | 44 |
+| Hit rate | 56.25% |
+
+The D-cache hit rate is intentionally lower because the stress program creates direct-mapped conflict accesses. This is useful for verification because it increases miss/refill activity and validates conflict behavior.
+
+---
+
+## 11. Tools Used
+
 - SystemVerilog
-- UVM (IEEE 1800.2-2017)
+- UVM IEEE 1800.2-2017
 - Riviera-PRO / EDA Playground
-- TCL (`run.do`) simulation scripting
+- TCL simulation scripting using `run.do`
+- VCD/ASDB waveform debug
+- Functional coverage database generation using ACDB
 
 ---
 
-## How to Run (EDA Playground)
-1. Upload `design.sv` and `testbench.sv`
-2. Enable **UVM**
-3. Add compile define: +define+TB_LOADS_PROGRAM
-4. Use `run.do` as the simulation script
-5. Run simulation and view coverage results
+## 12. How to Run on EDA Playground
+
+### 12.1 Required Files
+
+```text
+design.sv
+testbench.sv
+rv32i_pkg.sv
+rv32i_alu.sv
+rv32i_regfile.sv
+rv32i_decode.sv
+rv32i_hazard_unit.sv
+rv32i_forward_unit.sv
+rv32i_mem_unit.sv
+rv32i_icache.sv
+rv32i_dcache.sv
+rv32i_core.sv
+run.do
+```
+
+### 12.2 Compile Define
+
+```text
++define+TB_LOADS_PROGRAM
+```
+
+### 12.3 Example Compile Command
+
+```bash
+vlib work && vlog '-sv2k12' '-timescale' '1ns/1ps' '+define+TB_LOADS_PROGRAM' \
++incdir+$RIVIERA_HOME/vlib/uvm-1800.2-2017/src \
+-l uvm_1800_2_2017 \
+design.sv testbench.sv && vsim -c -do run.do
+```
+
+### 12.4 Example run.do
+
+```tcl
+vsim work.tb_top +access+r
+run -all
+exit
+```
 
 ---
 
-## Notes
-This project emphasizes **verification methodology** rather than performance
-optimization. It is intended as a learning and demonstration platform for
-ASIC/SoC verification workflows.
+## 13. Expected Output
+
+```text
+PHASE PASS: scoreboard ok; program executed; coverage collected.
+
+[ICACHE_STATS] requests=58836 hits=58578 misses=258 refills=258 hit_rate=99.56%
+[ICACHE_COV] coverage=100.00%
+
+[DCACHE_STATS] requests=128 reads=84 writes=44 hits=72 misses=56 refills=32 write_through=44 hit_rate=56.25%
+[DCACHE_COV] coverage=100.00%
+
+[CACHE_ASSERTS] failures=0
+```
+
+---
+
+## 14. Verification Methodology
+
+The verification approach combines architectural checking with targeted microarchitectural validation. The core is validated at the commit boundary while the cache hierarchy is checked using dedicated coverage, statistics, stress stimulus, and protocol assertions.
+
+- Architectural commit-trace checking.
+- Independent reference model scoreboard.
+- Coverage-driven program generation.
+- Directed pipeline hazard validation.
+- Directed control-flow validation.
+- Variable-latency memory response validation.
+- Cache hit/miss/refill/write-through validation.
+- Protocol assertion checking for cache/memory handshakes.
+- Regression result tracking with zero-error pass/fail criteria.
+
+---
+
+## 15. Known Limitations
+
+- Full RV32I instruction coverage is not yet implemented.
+- CSR support is not yet implemented.
+- Exceptions and interrupts are not yet implemented.
+- Misaligned memory access handling is not implemented.
+- Byte and halfword load/store variants are not yet supported.
+- No branch prediction is implemented in the current core.
+- No AXI/AHB bus wrapper is currently integrated.
+- D-cache is write-through and does not include dirty-bit write-back eviction.
+- No post-synthesis timing closure or Fmax analysis has been performed.
+
+---
+
+## 16. Future Enhancements
+
+- Branch prediction and BTB integration.
+- CSR and exception handling.
+- Expanded RV32I ISA support.
+- AXI4-Lite or AXI4 memory interface wrapper.
+- Write-back D-cache with dirty-bit eviction support.
+- Instruction/data cache performance counters exposed through CSRs.
+- Random instruction stream generation.
+- Formal checks for pipeline and cache invariants.
+
+---
+
+## 17. Project Positioning
+
+This project demonstrates CPU verification methodology across pipeline, memory, and cache behavior. It shows how a simple RV32I pipeline can be expanded into a more realistic verification platform with external memory interfaces, latency tolerance, cache integration, coverage collection, protocol assertions, and scoreboard-driven correctness checking.
+
+The project is suitable as a portfolio demonstration for the following roles:
+
+- Design Verification Engineer
+- CPU Verification Engineer
+- SoC Verification Engineer
+- RTL Design / Verification Engineer
+
+---
+
+**RV32I CPU Verification Project | SystemVerilog/UVM | Phase 3 Complete**
