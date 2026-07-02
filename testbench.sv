@@ -3,7 +3,7 @@
 import uvm_pkg::*;
 
 
-`define IMEM_WORD(i) dut.imem[i]
+`define IMEM_WORD(i) tb_imem[i]
 localparam int IMEM_WORDS = 256;  // 32-bit words
 
 // ============================================================
@@ -12,6 +12,23 @@ localparam int IMEM_WORDS = 256;  // 32-bit words
 interface core_if;
   logic clk;
   logic rst_n;
+  
+  logic        imem_req_valid;
+  logic        imem_req_ready;
+  logic [31:0] imem_req_addr;
+
+  logic        imem_rsp_valid;
+  logic [31:0] imem_rsp_rdata;
+  
+  logic        dmem_req_valid;
+  logic        dmem_req_ready;
+  logic        dmem_req_we;
+  logic [31:0] dmem_req_addr;
+  logic [31:0] dmem_req_wdata;
+  logic [3:0]  dmem_req_wstrb;
+
+  logic        dmem_rsp_valid;
+  logic [31:0] dmem_rsp_rdata;
 
   logic        commit_valid;
   logic [31:0] commit_pc;
@@ -64,6 +81,44 @@ function automatic bit [31:0] imm_j(bit [31:0] ins);
   return {{11{imm21[20]}}, imm21};
 endfunction
 
+// ============================================================
+// Instruction encoders for directed stimulus
+// ============================================================
+function automatic bit [31:0] enc_addi(
+  input bit [4:0] rd,
+  input bit [4:0] rs1,
+  input int       imm
+);
+  bit [11:0] imm12;
+  begin
+    imm12 = imm[11:0];
+    return {imm12, rs1, 3'b000, rd, 7'b0010011};
+  end
+endfunction
+
+function automatic bit [31:0] enc_lw(
+  input bit [4:0] rd,
+  input bit [4:0] rs1,
+  input int       imm
+);
+  bit [11:0] imm12;
+  begin
+    imm12 = imm[11:0];
+    return {imm12, rs1, 3'b010, rd, 7'b0000011};
+  end
+endfunction
+
+function automatic bit [31:0] enc_sw(
+  input bit [4:0] rs2,
+  input bit [4:0] rs1,
+  input int       imm
+);
+  bit [11:0] imm12;
+  begin
+    imm12 = imm[11:0];
+    return {imm12[11:5], rs2, rs1, 3'b010, imm12[4:0], 7'b0100011};
+  end
+endfunction
 // ============================================================
 // Monitor
 // ============================================================
@@ -496,11 +551,261 @@ module tb_top;
   core_if cif();
 
   initial cif.clk = 0;
-  always #5 cif.clk = ~cif.clk;
+  always #0.5 cif.clk = ~cif.clk;
+  
+  // ============================================================
+  // Instruction Memory Storage
+  // Backing memory behind I-cache
+  // ============================================================
+  logic [31:0] tb_imem [0:IMEM_WORDS-1];
+  
+  logic        imem_mem_req_valid;
+  logic        imem_mem_req_ready;
+  logic [31:0] imem_mem_req_addr;
+  logic        imem_mem_rsp_valid;
+  logic [31:0] imem_mem_rsp_rdata;
+  
+  logic        imem_busy;
+  logic [31:0] imem_pending_addr;
+  logic [3:0]  imem_delay_cnt;
 
-  riscv_core_5stage dut (
+  logic icache_stat_req;
+  logic icache_stat_hit;
+  logic icache_stat_miss;
+  logic icache_stat_refill;
+
+  int unsigned icache_req_count;
+  int unsigned icache_hit_count;
+  int unsigned icache_miss_count;
+  int unsigned icache_refill_count;
+
+  bit seen_icache_miss;
+  real icache_hit_rate;
+  
+  logic dcache_stat_req;
+  logic dcache_stat_read;
+  logic dcache_stat_write;
+  logic dcache_stat_hit;
+  logic dcache_stat_miss;
+  logic dcache_stat_refill;
+  logic dcache_stat_write_through;
+
+  int unsigned dcache_req_count;
+  int unsigned dcache_read_count;
+  int unsigned dcache_write_count;
+  int unsigned dcache_hit_count;
+  int unsigned dcache_miss_count;
+  int unsigned dcache_refill_count;
+  int unsigned dcache_write_through_count;
+
+  bit seen_dcache_miss;
+  real dcache_hit_rate;
+  int unsigned cache_assert_fail_count;
+  
+  // ============================================================
+  // I-cache functional coverage
+  // ============================================================
+  covergroup cg_icache @(posedge cif.clk);
+    option.per_instance = 1;
+
+    cp_req : coverpoint icache_stat_req iff (cif.rst_n) {
+      bins SEEN = {1};
+    }
+
+    cp_hit : coverpoint icache_stat_hit iff (cif.rst_n) {
+      bins SEEN = {1};
+    }
+
+    cp_miss : coverpoint icache_stat_miss iff (cif.rst_n) {
+      bins SEEN = {1};
+    }
+
+    cp_refill : coverpoint icache_stat_refill iff (cif.rst_n) {
+      bins SEEN = {1};
+    }
+
+    cp_hit_after_miss : coverpoint icache_stat_hit iff (cif.rst_n && seen_icache_miss) {
+      bins SEEN = {1};
+    }
+
+  endgroup
+  
+  // ============================================================
+  // D-cache functional coverage
+  // ============================================================
+  covergroup cg_dcache @(posedge cif.clk);
+    option.per_instance = 1;
+
+    cp_req : coverpoint dcache_stat_req iff (cif.rst_n) {
+      bins SEEN = {1};
+    }
+
+    cp_read : coverpoint dcache_stat_read iff (cif.rst_n) {
+      bins SEEN = {1};
+    }
+
+    cp_write : coverpoint dcache_stat_write iff (cif.rst_n) {
+      bins SEEN = {1};
+    }
+
+    cp_hit : coverpoint dcache_stat_hit iff (cif.rst_n) {
+      bins SEEN = {1};
+    }
+
+    cp_miss : coverpoint dcache_stat_miss iff (cif.rst_n) {
+      bins SEEN = {1};
+    }
+
+    cp_refill : coverpoint dcache_stat_refill iff (cif.rst_n) {
+      bins SEEN = {1};
+    }
+
+    cp_write_through : coverpoint dcache_stat_write_through iff (cif.rst_n) {
+      bins SEEN = {1};
+    }
+
+    cp_hit_after_miss : coverpoint dcache_stat_hit iff (cif.rst_n && seen_dcache_miss) {
+      bins SEEN = {1};
+    }
+
+  endgroup
+
+  cg_icache icache_cg;
+  cg_dcache dcache_cg;
+
+  initial begin
+    icache_cg = new();
+    dcache_cg = new();
+    cache_assert_fail_count = 0;
+  end
+  
+  initial begin
+    for (int i = 0; i < IMEM_WORDS; i++) begin
+      tb_imem[i] = 32'h0000_0013; // NOP
+    end
+  end
+  
+  // ============================================================
+  // Data Memory Storage
+  // Backing memory behind D-cache
+  // ============================================================
+  logic [31:0] tb_dmem [0:IMEM_WORDS-1];
+
+  // ============================================================
+  // Variable-Latency Data Memory Model
+  // Connected behind D-cache
+  // ============================================================
+
+  logic        dmem_busy;
+  logic        dmem_pending_we;
+  logic [31:0] dmem_pending_addr;
+  logic [31:0] dmem_pending_wdata;
+  logic [3:0]  dmem_pending_wstrb;
+  logic [3:0]  dmem_delay_cnt;
+  
+  logic        dmem_mem_req_valid;
+  logic        dmem_mem_req_ready;
+  logic        dmem_mem_req_we;
+  logic [31:0] dmem_mem_req_addr;
+  logic [31:0] dmem_mem_req_wdata;
+  logic [3:0]  dmem_mem_req_wstrb;
+
+  logic        dmem_mem_rsp_valid;
+  logic [31:0] dmem_mem_rsp_rdata;
+  
+  
+  always_comb begin
+    // Accept a new request only when memory model is idle.
+    dmem_mem_req_ready = !dmem_busy;
+
+    // Response is generated by sequential model.
+    // Default assignments avoid X-propagation.
+  end
+
+  always_ff @(posedge cif.clk or negedge cif.rst_n) begin
+    if (!cif.rst_n) begin
+      dmem_busy          <= 1'b0;
+      dmem_pending_we    <= 1'b0;
+      dmem_pending_addr  <= 32'd0;
+      dmem_pending_wdata <= 32'd0;
+      dmem_pending_wstrb <= 4'd0;
+      dmem_delay_cnt     <= 4'd0;
+
+      dmem_mem_rsp_valid <= 1'b0;
+      dmem_mem_rsp_rdata <= 32'd0;
+    end else begin
+      dmem_mem_rsp_valid <= 1'b0;
+      dmem_mem_rsp_rdata <= 32'd0;
+
+      // Accept new request from D-cache
+      if (!dmem_busy && dmem_mem_req_valid) begin
+        dmem_busy          <= 1'b1;
+        dmem_pending_we    <= dmem_mem_req_we;
+        dmem_pending_addr  <= dmem_mem_req_addr;
+        dmem_pending_wdata <= dmem_mem_req_wdata;
+        dmem_pending_wstrb <= dmem_mem_req_wstrb;
+
+        // Deterministic latency pattern: 1 to 4 cycles
+        dmem_delay_cnt <= dmem_mem_req_addr[3:2] + 4'd1;
+      end
+
+      // Service pending request
+      else if (dmem_busy) begin
+        if (dmem_delay_cnt != 0) begin
+          dmem_delay_cnt <= dmem_delay_cnt - 1'b1;
+        end else begin
+          int unsigned didx;
+          didx = dmem_pending_addr[31:2];
+
+          // Store
+          if (dmem_pending_we) begin
+            if (didx < IMEM_WORDS) begin
+              if (dmem_pending_wstrb[0]) tb_dmem[didx][7:0]   <= dmem_pending_wdata[7:0];
+              if (dmem_pending_wstrb[1]) tb_dmem[didx][15:8]  <= dmem_pending_wdata[15:8];
+              if (dmem_pending_wstrb[2]) tb_dmem[didx][23:16] <= dmem_pending_wdata[23:16];
+              if (dmem_pending_wstrb[3]) tb_dmem[didx][31:24] <= dmem_pending_wdata[31:24];
+            end
+
+            dmem_mem_rsp_valid <= 1'b1;
+            dmem_mem_rsp_rdata <= 32'd0;
+          end
+
+          // Load
+          else begin
+            dmem_mem_rsp_valid <= 1'b1;
+
+            if (didx < IMEM_WORDS) begin
+              dmem_mem_rsp_rdata <= tb_dmem[didx];
+            end else begin
+              dmem_mem_rsp_rdata <= 32'd0;
+            end
+          end
+
+          dmem_busy <= 1'b0;
+        end
+      end
+    end
+  end
+
+  rv32i_core dut (
     .clk             (cif.clk),
     .rst_n           (cif.rst_n),
+    .imem_req_valid  (cif.imem_req_valid),
+    .imem_req_ready  (cif.imem_req_ready),
+    .imem_req_addr   (cif.imem_req_addr),
+
+    .imem_rsp_valid  (cif.imem_rsp_valid),
+    .imem_rsp_rdata  (cif.imem_rsp_rdata),
+    
+    .dmem_req_valid (cif.dmem_req_valid),
+    .dmem_req_ready (cif.dmem_req_ready),
+    .dmem_req_we    (cif.dmem_req_we),
+    .dmem_req_addr  (cif.dmem_req_addr),
+    .dmem_req_wdata (cif.dmem_req_wdata),
+    .dmem_req_wstrb (cif.dmem_req_wstrb),
+
+    .dmem_rsp_valid (cif.dmem_rsp_valid),
+    .dmem_rsp_rdata (cif.dmem_rsp_rdata),
     .commit_valid    (cif.commit_valid),
     .commit_pc       (cif.commit_pc),
     .commit_instr    (cif.commit_instr),
@@ -508,13 +813,287 @@ module tb_top;
     .commit_rd_we    (cif.commit_rd_we),
     .commit_rd_wdata (cif.commit_rd_wdata)
   );
+  
+  rv32i_dcache u_dcache (
+    .clk           (cif.clk),
+    .rst_n         (cif.rst_n),
+
+    // Core / MTU side
+    .cpu_req_valid (cif.dmem_req_valid),
+    .cpu_req_ready (cif.dmem_req_ready),
+    .cpu_req_we    (cif.dmem_req_we),
+    .cpu_req_addr  (cif.dmem_req_addr),
+    .cpu_req_wdata (cif.dmem_req_wdata),
+    .cpu_req_wstrb (cif.dmem_req_wstrb),
+
+    .cpu_rsp_valid (cif.dmem_rsp_valid),
+    .cpu_rsp_rdata (cif.dmem_rsp_rdata),
+
+    // Backing memory side
+    .mem_req_valid (dmem_mem_req_valid),
+    .mem_req_ready (dmem_mem_req_ready),
+    .mem_req_we    (dmem_mem_req_we),
+    .mem_req_addr  (dmem_mem_req_addr),
+    .mem_req_wdata (dmem_mem_req_wdata),
+    .mem_req_wstrb (dmem_mem_req_wstrb),
+
+    .mem_rsp_valid (dmem_mem_rsp_valid),
+    .mem_rsp_rdata (dmem_mem_rsp_rdata),
+    .stat_req            (dcache_stat_req),
+    .stat_read           (dcache_stat_read),
+    .stat_write          (dcache_stat_write),
+    .stat_hit            (dcache_stat_hit),
+    .stat_miss           (dcache_stat_miss),
+    .stat_refill         (dcache_stat_refill),
+    .stat_write_through  (dcache_stat_write_through)
+  );
+  
+  // ============================================================
+  // D-cache statistics counters
+  // ============================================================
+  always_ff @(posedge cif.clk or negedge cif.rst_n) begin
+    if (!cif.rst_n) begin
+      dcache_req_count           <= 0;
+      dcache_read_count          <= 0;
+      dcache_write_count         <= 0;
+      dcache_hit_count           <= 0;
+      dcache_miss_count          <= 0;
+      dcache_refill_count        <= 0;
+      dcache_write_through_count <= 0;
+      seen_dcache_miss           <= 1'b0;
+    end else begin
+      if (dcache_stat_req) begin
+        dcache_req_count <= dcache_req_count + 1;
+      end
+
+      if (dcache_stat_read) begin
+        dcache_read_count <= dcache_read_count + 1;
+      end
+
+      if (dcache_stat_write) begin
+        dcache_write_count <= dcache_write_count + 1;
+      end
+
+      if (dcache_stat_hit) begin
+        dcache_hit_count <= dcache_hit_count + 1;
+      end
+
+      if (dcache_stat_miss) begin
+        dcache_miss_count <= dcache_miss_count + 1;
+        seen_dcache_miss  <= 1'b1;
+      end
+
+      if (dcache_stat_refill) begin
+        dcache_refill_count <= dcache_refill_count + 1;
+      end
+
+      if (dcache_stat_write_through) begin
+        dcache_write_through_count <= dcache_write_through_count + 1;
+      end
+    end
+  end
+  
+  rv32i_icache u_icache (
+    .clk           (cif.clk),
+    .rst_n         (cif.rst_n),
+
+    .cpu_req_valid (cif.imem_req_valid),
+    .cpu_req_ready (cif.imem_req_ready),
+    .cpu_req_addr  (cif.imem_req_addr),
+
+    .cpu_rsp_valid (cif.imem_rsp_valid),
+    .cpu_rsp_rdata (cif.imem_rsp_rdata),
+
+    .mem_req_valid (imem_mem_req_valid),
+    .mem_req_ready (imem_mem_req_ready),
+    .mem_req_addr  (imem_mem_req_addr),
+
+    .mem_rsp_valid (imem_mem_rsp_valid),
+    .mem_rsp_rdata (imem_mem_rsp_rdata),
+    .stat_req     (icache_stat_req),
+    .stat_hit     (icache_stat_hit),
+    .stat_miss    (icache_stat_miss),
+    .stat_refill  (icache_stat_refill)
+  );
+  
+  // ============================================================
+  // I-cache statistics counters
+  // ============================================================
+  always_ff @(posedge cif.clk or negedge cif.rst_n) begin
+    if (!cif.rst_n) begin
+      icache_req_count    <= 0;
+      icache_hit_count    <= 0;
+      icache_miss_count   <= 0;
+      icache_refill_count <= 0;
+      seen_icache_miss    <= 1'b0;
+    end else begin
+      if (icache_stat_req) begin
+        icache_req_count <= icache_req_count + 1;
+      end
+
+      if (icache_stat_hit) begin
+        icache_hit_count <= icache_hit_count + 1;
+      end
+
+      if (icache_stat_miss) begin
+        icache_miss_count <= icache_miss_count + 1;
+        seen_icache_miss  <= 1'b1;
+      end
+
+      if (icache_stat_refill) begin
+        icache_refill_count <= icache_refill_count + 1;
+      end
+    end
+  end
+  
+  // ============================================================
+  // Cache protocol assertions
+  // ============================================================
+
+  // ------------------------------------------------------------
+  // I-cache assertions
+  // ------------------------------------------------------------
+
+  // I-cache should not return a response unless the core is requesting.
+  a_icache_rsp_requires_req:
+  assert property (@(posedge cif.clk) disable iff (!cif.rst_n)
+    cif.imem_rsp_valid |-> cif.imem_req_valid
+  )
+  else begin
+    cache_assert_fail_count++;
+    `uvm_error("ICACHE_ASSERT", "I-cache response asserted without active CPU fetch request")
+  end
+
+  // Every I-cache miss should eventually produce a refill.
+  a_icache_miss_eventually_refills:
+  assert property (@(posedge cif.clk) disable iff (!cif.rst_n)
+    icache_stat_miss |-> ##[0:16] icache_stat_refill
+  )
+  else begin
+    cache_assert_fail_count++;
+    `uvm_error("ICACHE_ASSERT", "I-cache miss did not receive refill within expected latency window")
+  end
+
+  // If instruction memory applies backpressure, request address must remain stable.
+  a_icache_mem_req_stable_when_waiting:
+  assert property (@(posedge cif.clk) disable iff (!cif.rst_n)
+    (imem_mem_req_valid && !imem_mem_req_ready)
+      |=> (imem_mem_req_valid && $stable(imem_mem_req_addr))
+  )
+  else begin
+    cache_assert_fail_count++;
+    `uvm_error("ICACHE_ASSERT", "I-cache memory request address changed while memory was not ready")
+  end
+
+  // ------------------------------------------------------------
+  // D-cache assertions
+  // ------------------------------------------------------------
+
+  // Every accepted D-cache CPU request should eventually receive a response.
+  a_dcache_req_eventually_responds:
+  assert property (@(posedge cif.clk) disable iff (!cif.rst_n)
+    (cif.dmem_req_valid && cif.dmem_req_ready)
+      |-> ##[1:32] cif.dmem_rsp_valid
+  )
+  else begin
+    cache_assert_fail_count++;
+    `uvm_error("DCACHE_ASSERT", "Accepted D-cache CPU request did not receive response")
+  end
+
+  // Every accepted store should eventually generate a write-through memory request.
+  a_dcache_store_generates_write_through:
+  assert property (@(posedge cif.clk) disable iff (!cif.rst_n)
+    (cif.dmem_req_valid && cif.dmem_req_ready && cif.dmem_req_we)
+      |-> ##[1:16] (dmem_mem_req_valid && dmem_mem_req_we)
+  )
+  else begin
+    cache_assert_fail_count++;
+    `uvm_error("DCACHE_ASSERT", "Accepted D-cache store did not generate write-through memory request")
+  end
+
+  // Backing data-memory request must remain stable while memory is not ready.
+  a_dcache_mem_req_stable_when_waiting:
+  assert property (@(posedge cif.clk) disable iff (!cif.rst_n)
+    (dmem_mem_req_valid && !dmem_mem_req_ready)
+      |=> (dmem_mem_req_valid &&
+           $stable(dmem_mem_req_addr) &&
+           $stable(dmem_mem_req_we) &&
+           $stable(dmem_mem_req_wdata) &&
+           $stable(dmem_mem_req_wstrb))
+  )
+  else begin
+    cache_assert_fail_count++;
+    `uvm_error("DCACHE_ASSERT", "D-cache memory request changed while backing memory was not ready")
+  end
+
+  // A D-cache transaction cannot be both a read refill and a write-through completion.
+  a_dcache_refill_not_write_through_same_cycle:
+  assert property (@(posedge cif.clk) disable iff (!cif.rst_n)
+    !(dcache_stat_refill && dcache_stat_write_through)
+  )
+  else begin
+    cache_assert_fail_count++;
+    `uvm_error("DCACHE_ASSERT", "D-cache refill and write-through completion occurred in same cycle")
+  end
+  
+  // ============================================================
+  // Variable-Latency Instruction Memory Model
+  // Connected behind I-cache
+  // ============================================================
+
+  always_comb begin
+    imem_mem_req_ready = !imem_busy;
+  end
+
+  always_ff @(posedge cif.clk or negedge cif.rst_n) begin
+    if (!cif.rst_n) begin
+      imem_busy          <= 1'b0;
+      imem_pending_addr  <= 32'd0;
+      imem_delay_cnt     <= 4'd0;
+      imem_mem_rsp_valid <= 1'b0;
+      imem_mem_rsp_rdata <= 32'h0000_0013;
+    end else begin
+      imem_mem_rsp_valid <= 1'b0;
+      imem_mem_rsp_rdata <= 32'h0000_0013;
+
+      // Accept new instruction fetch request
+      if (!imem_busy && imem_mem_req_valid) begin
+        imem_busy         <= 1'b1;
+        imem_pending_addr <= imem_mem_req_addr;
+
+        // Deterministic latency: 1 to 4 cycles
+        imem_delay_cnt <= imem_mem_req_addr[3:2] + 4'd1;
+      end
+
+      // Service pending instruction fetch
+      else if (imem_busy) begin
+        if (imem_delay_cnt != 0) begin
+          imem_delay_cnt <= imem_delay_cnt - 1'b1;
+        end else begin
+          int unsigned idx;
+
+          idx = imem_pending_addr[31:2];
+
+          imem_mem_rsp_valid <= 1'b1;
+
+          if (idx < IMEM_WORDS) begin
+            imem_mem_rsp_rdata <= tb_imem[idx];
+          end else begin
+            imem_mem_rsp_rdata <= 32'h0000_0013;
+          end
+
+          imem_busy <= 1'b0;
+        end
+      end
+    end
+  end
 
 `ifdef TB_LOADS_PROGRAM
   
   initial begin : GEN_PROGRAM
     int i;
     int idx;
-    #1; // wait for DUT initial block to finish clearing imem
+    #1; // wait for tb_imem initialization before loading program
     idx = 0;
 
     // Seed registers for branches and memory ops
@@ -527,6 +1106,49 @@ module tb_top;
     // Force LUI + AUIPC early
     `IMEM_WORD(idx++) = {20'h00012, 5'd13, 7'b0110111}; // LUI   x13,0x00012
     `IMEM_WORD(idx++) = {20'h00034, 5'd14, 7'b0010111}; // AUIPC x14,0x00034
+    
+    // ============================================================
+    // D-cache directed stress block
+    // Exercises:
+    // - write-through stores
+    // - read misses 
+    // - read hits
+    // - write hits
+    // - repeated line reuse
+    // - index conflict behavior
+    // ============================================================
+
+    // Fill/reuse all 16 direct-mapped cache indices.
+    // Pattern per offset:
+    //   store -> write-through
+    //   load  -> read miss/refill or hit depending on prior state
+    //   load  -> expected read hit
+    for (int k = 0; k < 32; k++) begin
+      int off;
+      off = (k % 16) * 4;
+
+      `IMEM_WORD(idx++) = enc_addi(5'd23, 5'd0, k + 1);      // x23 = unique data
+      `IMEM_WORD(idx++) = enc_sw  (5'd23, 5'd1, off);        // sw x23, off(x1)
+      `IMEM_WORD(idx++) = enc_lw  (5'd24, 5'd1, off);        // lw x24, off(x1)
+      `IMEM_WORD(idx++) = enc_lw  (5'd25, 5'd1, off);        // lw x25, off(x1) hit
+    end
+
+    // Conflict stress.
+    // Addresses separated by 64 bytes map to the same cache index
+    // because CACHE_LINES=16 and line size=4 bytes.
+    // 64 bytes = 16 words = same index, different tag.
+    for (int k = 0; k < 8; k++) begin
+      int off;
+      int conflict_off;
+
+      off          = (k % 4) * 4;
+      conflict_off = off + 64;
+
+      `IMEM_WORD(idx++) = enc_addi(5'd23, 5'd0, 100 + k);          // x23 = conflict data
+      `IMEM_WORD(idx++) = enc_sw  (5'd23, 5'd1, conflict_off);    // write conflict address
+      `IMEM_WORD(idx++) = enc_lw  (5'd26, 5'd1, conflict_off);    // load/refill conflict line
+      `IMEM_WORD(idx++) = enc_lw  (5'd27, 5'd1, off);             // re-read original index
+    end
 
     // Main body
     for (i = idx; i < IMEM_WORDS-8; i++) begin
@@ -608,5 +1230,41 @@ module tb_top;
   initial begin
     $dumpfile("dump.vcd");
     $dumpvars;
+  end
+  
+  final begin
+    if (icache_req_count != 0) begin
+      icache_hit_rate = (100.0 * icache_hit_count) / icache_req_count;
+    end else begin
+      icache_hit_rate = 0.0;
+    end
+
+    $display("[ICACHE_STATS] requests=%0d hits=%0d misses=%0d refills=%0d hit_rate=%0.2f%%",
+             icache_req_count,
+             icache_hit_count,
+             icache_miss_count,
+             icache_refill_count,
+             icache_hit_rate);
+
+    $display("[ICACHE_COV] coverage=%0.2f%%", icache_cg.get_coverage());
+    
+    if (dcache_req_count != 0) begin
+      dcache_hit_rate = (100.0 * dcache_hit_count) / dcache_req_count;
+    end else begin
+      dcache_hit_rate = 0.0;
+    end
+
+    $display("[DCACHE_STATS] requests=%0d reads=%0d writes=%0d hits=%0d misses=%0d refills=%0d write_through=%0d hit_rate=%0.2f%%",
+             dcache_req_count,
+             dcache_read_count,
+             dcache_write_count,
+             dcache_hit_count,
+             dcache_miss_count,
+             dcache_refill_count,
+             dcache_write_through_count,
+             dcache_hit_rate);
+
+    $display("[DCACHE_COV] coverage=%0.2f%%", dcache_cg.get_coverage());
+    $display("[CACHE_ASSERTS] failures=%0d", cache_assert_fail_count);
   end
 endmodule
