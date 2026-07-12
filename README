@@ -34,7 +34,7 @@ The primary focus is CPU design verification. The testbench validates architectu
 
 ## 2. High-Level Architecture
 
-```text
+```
                   +---------------------------+
                   |        UVM Testbench       |
                   |---------------------------|
